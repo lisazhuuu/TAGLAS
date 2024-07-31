@@ -18,9 +18,9 @@ import torch
 from torch import Tensor, LongTensor
 from torch.utils.data import Dataset
 from torch_geometric.loader.dataloader import Collater
-
+ 
 from TAGLAS.data import TAGDataset, TAGData
-from TAGLAS.utils.graph import edge_index_to_sparse_csr
+from TAGLAS.utils.graph import edge_index_to_sparse_csr, personalized_pagerank
 from .process import feature_embedding_process, subgraph_process, value_to_tensor, parallel_build_sample_process
 
 
@@ -610,17 +610,22 @@ class SubgraphTask(DefaultTask):
             sample_size: Union[float, int, list] = 1.0,
             sample_mode: str = "random",
             hop: int = 3,
-            max_nodes_per_hop: int = 5,
+            max_nodes_per_hop: int = 10,
             num_workers: int = 0,
-            to_sparse: bool = True,
+            to_sparse: bool = False,
+            use_ppr: bool = False,
+            ppr_scores: Optional[dict] = None,
             **kwargs) -> None:
         self.hop = hop
         self.max_nodes_per_hop = max_nodes_per_hop
         self.num_workers = num_workers
         self.to_sparse = to_sparse
+        self.use_ppr = use_ppr # Mark whether the task is using ppr
+        self.ppr_scores = ppr_scores # Node's ppr score
+        print("Initializing SubgraphTask with PPR...")
         super().__init__(dataset, split, save_data, from_saved, save_name, post_funcs, filter_func, sample_size, sample_mode,
                          **kwargs)
-
+    
     @property
     def default_save_name(self):
         if isinstance(self.sample_size, list):
@@ -634,11 +639,13 @@ class SubgraphTask(DefaultTask):
             index: Union[int, list, Tensor],
             edge_index: LongTensor,
             node_map: LongTensor,
-            edge_map: LongTensor) -> tuple[LongTensor, LongTensor, LongTensor, LongTensor]:
+            edge_map: LongTensor,
+            # Added an optional parameter to store node's ppr score (if it has)
+            ppr_scores: Optional[dict] = None) -> tuple[LongTensor, LongTensor, LongTensor, LongTensor]:
         """Extract ego-subgraph around the index.
         """
         return subgraph_process(index, edge_index, node_map, edge_map,
-                                self.hop, self.max_nodes_per_hop, to_sparse=self.to_sparse)
+                            self.hop, self.max_nodes_per_hop, to_sparse=self.to_sparse, ppr_scores=ppr_scores)
 
     def __build_sample__(
             self,
@@ -650,7 +657,8 @@ class SubgraphTask(DefaultTask):
             edge_map: LongTensor,
     ):
         index = value_to_tensor(index)
-        edge_index, node_map, edge_map, target_index = self.__process_graph__(index, edge_index, node_map, edge_map)
+        # Added ppr score when calling __process_graph__
+        edge_index, node_map, edge_map, target_index = self.__process_graph__(index, edge_index, node_map, edge_map, self.ppr_scores)
         target_index = value_to_tensor(target_index)
         label_map = value_to_tensor(label_map)
         y = value_to_tensor(y, to_long=False)
@@ -663,12 +671,21 @@ class SubgraphTask(DefaultTask):
         edge_index = self.data.edge_index
         node_map = self.data.node_map
         edge_map = self.data.edge_map
+        
+        # Calculating ppr scores if the nodes use ppr
+        if self.use_ppr:
+            print("Calculating PPR scores...")
+            num_nodes = node_map.size(0) 
+            ppr_vector = {i: 1.0 for i in range(num_nodes)}
+            self.ppr_scores = personalized_pagerank(edge_index, num_nodes, ppr_vector, max_iter=100)
+        
         if self.to_sparse:
             edge_index = edge_index_to_sparse_csr(edge_index, edge_map)
+            
         return edge_index, node_map, edge_map
 
     def __build_task__(self):
-        # edge_index, node_map, edge_map = self.__before_build_dataset__()
+        edge_index, node_map, edge_map = self.__before_build_dataset__()
         data_list = parallel_build_sample_process(self)
         return data_list
 

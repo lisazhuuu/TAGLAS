@@ -1,9 +1,13 @@
 from typing import (
     Union,
     Any,
+    List, 
+    Tuple,
+    Dict, 
     Optional
 )
 
+import os
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -12,8 +16,11 @@ from torch.utils.data import Dataset, DataLoader
 from torch_sparse import SparseTensor
 from tqdm import tqdm
 
-from TAGLAS.utils.graph import k_hop_subgraph, sample_k_hop_subgraph_sparse
+from TAGLAS.utils.graph import edge_index_to_sparse_csr, k_hop_subgraph, sample_k_hop_subgraph_sparse
 from TAGLAS.utils.io import torch_safe_save, torch_safe_load
+
+import scipy.sparse as sp
+from scipy.sparse import csr_matrix
 
 
 def text2feature(
@@ -38,7 +45,7 @@ def feature_embedding_process(
         texts: Union[list[Any], np.ndarray],
         encoder: Any = None,
         file_name: str = None,
-        from_saved: bool = True) -> Tensor:
+        from_saved: Optional[bool] = True) -> Tensor:
     """Convert input text features into embedding using the given encoder and save the generated embedding.
     Args:
         texts (Union[list[Any], np.ndarray]): Collection of texts. Can be list or np.ndarray,
@@ -62,7 +69,6 @@ def feature_embedding_process(
         torch_safe_save(embeddings, file_name)
     return embeddings
 
-
 def subgraph_process(
         index: Union[int, list, Tensor],
         edge_index: Union[LongTensor, SparseTensor],
@@ -71,22 +77,23 @@ def subgraph_process(
         hop: int = 3,
         max_nodes_per_hop: int = -1,
         num_nodes: Optional[int] = None,
-        to_sparse: bool = True) -> tuple[LongTensor, LongTensor, LongTensor, LongTensor]:
+        to_sparse: bool = True,
+        # Added an optional parameter to store the nodes' ppr scores 
+        ppr_scores: Optional[dict] = None) -> tuple[LongTensor, LongTensor, LongTensor, LongTensor]:
     """generate subgraph for the input node index.
     """
     if to_sparse:
-        subset, processed_edge_index, mapping, processed_edge_map = sample_k_hop_subgraph_sparse(index, hop, edge_index,
-                                                                                                 max_nodes_per_hop)
+        subset, processed_edge_index, mapping, processed_edge_map = sample_k_hop_subgraph_sparse(index, hop, edge_index, # Pass ppr_scores to sample_k_hop_subgraph_sparse
+                                                                                max_nodes_per_hop, use_ppr=(ppr_scores is not None), ppr_scores=ppr_scores)
 
     else:
-        subset, processed_edge_index, mapping, edge_mask = k_hop_subgraph(index, hop, edge_index, max_nodes_per_hop,
-                                                                          relabel_nodes=True, num_nodes=num_nodes)
+        subset, processed_edge_index, mapping, edge_mask = k_hop_subgraph(index, hop, edge_index, max_nodes_per_hop, # Pass ppr_scores to k_hop_subgraph
+                                                                          relabel_nodes=True, num_nodes=num_nodes, use_ppr=(ppr_scores is not None), ppr_scores=ppr_scores)
         processed_edge_map = edge_map[edge_mask]
     processed_node_map = node_map[subset]
     return processed_edge_index, processed_node_map, processed_edge_map, mapping
 
-
-def value_to_tensor(value: Any, to_long=True):
+def value_to_tensor(value, to_long=True):
     r"""Util function to convert all input to tensor and do the uplifting of dimension for 0-dimension tensor.
     """
     if value is None:
@@ -113,7 +120,7 @@ class MultiprocessHelper(Dataset):
         graph_level(bool, optional): If true, assume the given task is for graph-level.
     """
 
-    def __init__(self, task: Any, graph_level: bool = False):
+    def __init__(self, task: Any, graph_level: Optional[bool] = False):
         self.task = task
         self.sample_labels = task.sample_labels
         self.sample_indexs = task.sample_indexs
@@ -139,7 +146,7 @@ class MultiprocessHelper(Dataset):
         return self.sample_indexs.size(0)
 
 
-def parallel_build_sample_process(task: Any, graph_level: bool = False):
+def parallel_build_sample_process(task: Any, graph_level: Optional[bool] = False):
     r"""Process function for building task with parallel process.
     Args:
         task (Any): Any task module inherit BaseTask.
@@ -167,7 +174,6 @@ def parallel_build_sample_process(task: Any, graph_level: bool = False):
                     pbar.update(len(data))
                     del data
             return data_list
-
     for i in tqdm(range(len(helper)), total=len(helper), desc="Generate task samples."):
         data_list.append(helper[i])
 
